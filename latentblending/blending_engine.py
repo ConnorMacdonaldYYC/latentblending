@@ -1,28 +1,35 @@
 import os
-import torch
-import numpy as np
-import warnings
-import time
-from tqdm.auto import tqdm
-from PIL import Image
-from typing import List, Optional
-import lpips
 import platform
+import time
+import warnings
+from typing import List, Optional
+
+import lpips
+import numpy as np
+import torch
+from PIL import Image
+from tqdm.auto import tqdm
+
 from latentblending.diffusers_holder import DiffusersHolder
-from latentblending.utils import interpolate_spherical, interpolate_linear, add_frames_linear_interp
-from lunar_tools import MovieSaver, fill_up_frames_linear_interpolation
-warnings.filterwarnings('ignore')
+from latentblending.utils import (
+    add_frames_linear_interp,
+    interpolate_linear,
+    interpolate_spherical,
+)
+
+warnings.filterwarnings("ignore")
 torch.backends.cudnn.benchmark = False
 torch.set_grad_enabled(False)
 
 
-class BlendingEngine():
+class BlendingEngine:
     def __init__(
-            self,
-            pipe: None,
-            do_compile: bool = False,
-            guidance_scale_mid_damper: float = 0.5,
-            mid_compression_scaler: float = 1.2):
+        self,
+        pipe: None,
+        do_compile: bool = False,
+        guidance_scale_mid_damper: float = 0.5,
+        mid_compression_scaler: float = 1.2,
+    ):
         r"""
         Initializes the latent blending class.
         Args:
@@ -36,11 +43,10 @@ class BlendingEngine():
                 imply more values in the middle. However the inflection point can occur outside the middle,
                 thus high values can give rough transitions. Values around 2 should be fine.
         """
-        assert guidance_scale_mid_damper > 0 \
-            and guidance_scale_mid_damper <= 1.0, \
-            f"guidance_scale_mid_damper neees to be in interval (0,1], you provided {guidance_scale_mid_damper}"
+        assert (
+            guidance_scale_mid_damper > 0 and guidance_scale_mid_damper <= 1.0
+        ), f"guidance_scale_mid_damper neees to be in interval (0,1], you provided {guidance_scale_mid_damper}"
 
-    
         self.dh = DiffusersHolder(pipe)
         self.device = self.dh.device
         self.set_dimensions()
@@ -71,32 +77,34 @@ class BlendingEngine():
         self.multi_transition_img_last = None
         self.dt_unet_step = 0
         if platform.system() == "Darwin":
-            self.lpips = lpips.LPIPS(net='alex')
+            self.lpips = lpips.LPIPS(net="alex").to(self.device)
         else:
-            self.lpips = lpips.LPIPS(net='alex').cuda(self.device)
+            self.lpips = lpips.LPIPS(net="alex").cuda(self.device)
 
         self.set_prompt1("")
         self.set_prompt2("")
-        
+
         self.set_branch1_crossfeed()
         self.set_parental_crossfeed()
-        
+
         self.set_num_inference_steps()
         self.benchmark_speed()
         self.set_branching()
-        
+
         if do_compile:
             print("starting compilation")
-            from sfast.compilers.diffusion_pipeline_compiler import (compile, CompilationConfig)
+            from sfast.compilers.diffusion_pipeline_compiler import (
+                CompilationConfig,
+                compile,
+            )
+
             self.dh.pipe.enable_xformers_memory_efficient_attention()
             config = CompilationConfig.Default()
             config.enable_xformers = True
             config.enable_triton = True
             config.enable_cuda_graph = True
             self.dh.pipe = compile(self.dh.pipe, config)
-        
-        
-        
+
     def benchmark_speed(self):
         """
         Measures the time per diffusion step and for the vae decoding
@@ -105,17 +113,29 @@ class BlendingEngine():
         text_embeddings = self.dh.get_text_embedding("test")
         latents_start = self.dh.get_noise(np.random.randint(111111))
         # warmup
-        list_latents = self.dh.run_diffusion_sd_xl(text_embeddings=text_embeddings, latents_start=latents_start, return_image=False, idx_start=self.num_inference_steps-1)
+        list_latents = self.dh.run_diffusion_sd_xl(
+            text_embeddings=text_embeddings,
+            latents_start=latents_start,
+            return_image=False,
+            idx_start=self.num_inference_steps - 1,
+        )
         # bench unet
         t0 = time.time()
-        list_latents = self.dh.run_diffusion_sd_xl(text_embeddings=text_embeddings, latents_start=latents_start, return_image=False, idx_start=self.num_inference_steps-1)
+        list_latents = self.dh.run_diffusion_sd_xl(
+            text_embeddings=text_embeddings,
+            latents_start=latents_start,
+            return_image=False,
+            idx_start=self.num_inference_steps - 1,
+        )
         self.dt_unet_step = time.time() - t0
-        
+
         # bench vae
         t0 = time.time()
         img = self.dh.latent2image(list_latents[-1])
         self.dt_vae = time.time() - t0
-        print(f"time per unet iteration: {self.dt_unet_step} time for vae: {self.dt_vae}")
+        print(
+            f"time per unet iteration: {self.dt_unet_step} time for vae: {self.dt_vae}"
+        )
 
     def set_dimensions(self, size_output=None):
         r"""
@@ -141,14 +161,13 @@ class BlendingEngine():
                 guidance_scale = 0.0
             else:
                 guidance_scale = 4.0
-        
+
         self.guidance_scale_base = guidance_scale
         self.guidance_scale = guidance_scale
         self.dh.guidance_scale = guidance_scale
 
     def set_negative_prompt(self, negative_prompt):
-        r"""Set the negative prompt. Currenty only one negative prompt is supported
-        """
+        r"""Set the negative prompt. Currenty only one negative prompt is supported"""
         self.negative_prompt = negative_prompt
         self.dh.set_negative_prompt(negative_prompt)
 
@@ -158,12 +177,18 @@ class BlendingEngine():
         towards 0.5 the minimum will be reached.
         """
         mid_factor = 1 - np.abs(fract_mixing - 0.5) / 0.5
-        max_guidance_reduction = self.guidance_scale_base * (1 - self.guidance_scale_mid_damper) - 1
-        guidance_scale_effective = self.guidance_scale_base - max_guidance_reduction * mid_factor
+        max_guidance_reduction = (
+            self.guidance_scale_base * (1 - self.guidance_scale_mid_damper) - 1
+        )
+        guidance_scale_effective = (
+            self.guidance_scale_base - max_guidance_reduction * mid_factor
+        )
         self.guidance_scale = guidance_scale_effective
         self.dh.guidance_scale = guidance_scale_effective
 
-    def set_branch1_crossfeed(self, crossfeed_power=0, crossfeed_range=0, crossfeed_decay=0):
+    def set_branch1_crossfeed(
+        self, crossfeed_power=0, crossfeed_range=0, crossfeed_decay=0
+    ):
         r"""
         Sets the crossfeed parameters for the first branch to the last branch.
         Args:
@@ -178,7 +203,9 @@ class BlendingEngine():
         self.branch1_crossfeed_range = np.clip(crossfeed_range, 0, 1)
         self.branch1_crossfeed_decay = np.clip(crossfeed_decay, 0, 1)
 
-    def set_parental_crossfeed(self, crossfeed_power=None, crossfeed_range=None, crossfeed_decay=None):
+    def set_parental_crossfeed(
+        self, crossfeed_power=None, crossfeed_range=None, crossfeed_decay=None
+    ):
         r"""
         Sets the crossfeed parameters for all transition images (within the first and last branch).
         Args:
@@ -189,7 +216,7 @@ class BlendingEngine():
             crossfeed_decay: float [0,1]
                 Sets decay for branch1_crossfeed_power. Lower values make the decay stronger across the range.
         """
-        
+
         if self.dh.is_sdxl_turbo:
             if crossfeed_power is None:
                 crossfeed_power = 1.0
@@ -201,7 +228,7 @@ class BlendingEngine():
             crossfeed_power = 0.3
             crossfeed_range = 0.6
             crossfeed_decay = 0.9
-            
+
         self.parental_crossfeed_power = np.clip(crossfeed_power, 0, 1)
         self.parental_crossfeed_range = np.clip(crossfeed_range, 0, 1)
         self.parental_crossfeed_decay = np.clip(crossfeed_decay, 0, 1)
@@ -243,7 +270,7 @@ class BlendingEngine():
             image: Image
         """
         self.image2_lowres = image
-        
+
     def set_num_inference_steps(self, num_inference_steps=None):
         if self.dh.is_sdxl_turbo:
             if num_inference_steps is None:
@@ -251,11 +278,13 @@ class BlendingEngine():
         else:
             if num_inference_steps is None:
                 num_inference_steps = 30
-            
+
         self.num_inference_steps = num_inference_steps
         self.dh.set_num_inference_steps(num_inference_steps)
-        
-    def set_branching(self, depth_strength=None, t_compute_max_allowed=None, nmb_max_branches=None):
+
+    def set_branching(
+        self, depth_strength=None, t_compute_max_allowed=None, nmb_max_branches=None
+    ):
         """
         Sets the branching structure of the blending tree. Default arguments depend on pipe!
             depth_strength:
@@ -271,32 +300,41 @@ class BlendingEngine():
                 of your computer.
         """
         if self.dh.is_sdxl_turbo:
-            assert t_compute_max_allowed is None, "time-based branching not supported for SDXL Turbo"
+            assert (
+                t_compute_max_allowed is None
+            ), "time-based branching not supported for SDXL Turbo"
             if depth_strength is not None:
-                idx_inject = int(round(self.num_inference_steps*depth_strength))
+                idx_inject = int(round(self.num_inference_steps * depth_strength))
             else:
                 idx_inject = 2
             if nmb_max_branches is None:
                 nmb_max_branches = 10
-                
+
             self.list_idx_injection = [idx_inject]
             self.list_nmb_stems = [nmb_max_branches]
-            
+
         else:
             if depth_strength is None:
                 depth_strength = 0.5
             if t_compute_max_allowed is None and nmb_max_branches is None:
                 t_compute_max_allowed = 20
             elif t_compute_max_allowed is not None and nmb_max_branches is not None:
-                raise ValueErorr("Either specify t_compute_max_allowed or nmb_max_branches")
-            
-            self.list_idx_injection, self.list_nmb_stems = self.get_time_based_branching(depth_strength, t_compute_max_allowed, nmb_max_branches)    
+                raise ValueErorr(
+                    "Either specify t_compute_max_allowed or nmb_max_branches"
+                )
+
+            self.list_idx_injection, self.list_nmb_stems = (
+                self.get_time_based_branching(
+                    depth_strength, t_compute_max_allowed, nmb_max_branches
+                )
+            )
 
     def run_transition(
-            self,
-            recycle_img1: Optional[bool] = False,
-            recycle_img2: Optional[bool] = False,
-            fixed_seeds: Optional[List[int]] = None):
+        self,
+        recycle_img1: Optional[bool] = False,
+        recycle_img2: Optional[bool] = False,
+        fixed_seeds: Optional[List[int]] = None,
+    ):
         r"""
         Function for computing transitions.
         Returns a list of transition images using spherical latent blending.
@@ -314,13 +352,16 @@ class BlendingEngine():
         """
 
         # Sanity checks first
-        assert self.text_embedding1 is not None, 'Set the first text embedding with .set_prompt1(...) before'
-        assert self.text_embedding2 is not None, 'Set the second text embedding with .set_prompt2(...) before'
-        
+        assert (
+            self.text_embedding1 is not None
+        ), "Set the first text embedding with .set_prompt1(...) before"
+        assert (
+            self.text_embedding2 is not None
+        ), "Set the second text embedding with .set_prompt2(...) before"
 
         # Random seeds
         if fixed_seeds is not None:
-            if fixed_seeds == 'randomize':
+            if fixed_seeds == "randomize":
                 fixed_seeds = list(np.random.randint(0, 1000000, 2).astype(np.int32))
             else:
                 assert len(fixed_seeds) == 2, "Supply a list with len = 2"
@@ -328,7 +369,6 @@ class BlendingEngine():
             self.seed1 = fixed_seeds[0]
             self.seed2 = fixed_seeds[1]
 
-        
         # Compute / Recycle first image
         if not recycle_img1 or len(self.tree_latents[0]) != self.num_inference_steps:
             list_latents1 = self.compute_latents1()
@@ -344,28 +384,31 @@ class BlendingEngine():
         # Reset the tree, injecting the edge latents1/2 we just generated/recycled
         self.tree_latents = [list_latents1, list_latents2]
         self.tree_fracts = [0.0, 1.0]
-        self.tree_final_imgs = [self.dh.latent2image((self.tree_latents[0][-1])), self.dh.latent2image((self.tree_latents[-1][-1]))]
+        self.tree_final_imgs = [
+            self.dh.latent2image((self.tree_latents[0][-1])),
+            self.dh.latent2image((self.tree_latents[-1][-1])),
+        ]
         self.tree_idx_injection = [0, 0]
         self.tree_similarities = [self.get_tree_similarities]
 
-
         # Run iteratively, starting with the longest trajectory.
         # Always inserting new branches where they are needed most according to image similarity
+
         for s_idx in tqdm(range(len(self.list_idx_injection))):
             nmb_stems = self.list_nmb_stems[s_idx]
             idx_injection = self.list_idx_injection[s_idx]
-
             for i in range(nmb_stems):
-                fract_mixing, b_parent1, b_parent2 = self.get_mixing_parameters(idx_injection)
+                fract_mixing, b_parent1, b_parent2 = self.get_mixing_parameters(
+                    idx_injection
+                )
                 self.set_guidance_mid_dampening(fract_mixing)
-                list_latents = self.compute_latents_mix(fract_mixing, b_parent1, b_parent2, idx_injection)
+                list_latents = self.compute_latents_mix(
+                    fract_mixing, b_parent1, b_parent2, idx_injection
+                )
                 self.insert_into_tree(fract_mixing, idx_injection, list_latents)
                 # print(f"fract_mixing: {fract_mixing} idx_injection {idx_injection} bp1 {b_parent1} bp2 {b_parent2}")
 
         return self.tree_final_imgs
-    
-
-        
 
     def compute_latents1(self, return_image=False):
         r"""
@@ -379,9 +422,8 @@ class BlendingEngine():
         t0 = time.time()
         latents_start = self.get_noise(self.seed1)
         list_latents1 = self.run_diffusion(
-            list_conditionings,
-            latents_start=latents_start,
-            idx_start=0)
+            list_conditionings, latents_start=latents_start, idx_start=0
+        )
         t1 = time.time()
         self.dt_unet_step = (t1 - t0) / self.num_inference_steps
         self.tree_latents[0] = list_latents1
@@ -403,8 +445,16 @@ class BlendingEngine():
         # Influence from branch1
         if self.branch1_crossfeed_power > 0.0:
             # Set up the mixing_coeffs
-            idx_mixing_stop = int(round(self.num_inference_steps * self.branch1_crossfeed_range))
-            mixing_coeffs = list(np.linspace(self.branch1_crossfeed_power, self.branch1_crossfeed_power * self.branch1_crossfeed_decay, idx_mixing_stop))
+            idx_mixing_stop = int(
+                round(self.num_inference_steps * self.branch1_crossfeed_range)
+            )
+            mixing_coeffs = list(
+                np.linspace(
+                    self.branch1_crossfeed_power,
+                    self.branch1_crossfeed_power * self.branch1_crossfeed_decay,
+                    idx_mixing_stop,
+                )
+            )
             mixing_coeffs.extend((self.num_inference_steps - idx_mixing_stop) * [0])
             list_latents_mixing = self.tree_latents[0]
             list_latents2 = self.run_diffusion(
@@ -412,7 +462,8 @@ class BlendingEngine():
                 latents_start=latents_start,
                 idx_start=0,
                 list_latents_mixing=list_latents_mixing,
-                mixing_coeffs=mixing_coeffs)
+                mixing_coeffs=mixing_coeffs,
+            )
         else:
             list_latents2 = self.run_diffusion(list_conditionings, latents_start)
         self.tree_latents[-1] = list_latents2
@@ -436,7 +487,9 @@ class BlendingEngine():
                 the index in terms of diffusion steps, where the next insertion will start.
         """
         list_conditionings = self.get_mixed_conditioning(fract_mixing)
-        fract_mixing_parental = (fract_mixing - self.tree_fracts[b_parent1]) / (self.tree_fracts[b_parent2] - self.tree_fracts[b_parent1])
+        fract_mixing_parental = (fract_mixing - self.tree_fracts[b_parent1]) / (
+            self.tree_fracts[b_parent2] - self.tree_fracts[b_parent1]
+        )
         # idx_reversed = self.num_inference_steps - idx_injection
 
         list_latents_parental_mix = []
@@ -446,14 +499,26 @@ class BlendingEngine():
             if latents_p1 is None or latents_p2 is None:
                 latents_parental = None
             else:
-                latents_parental = interpolate_spherical(latents_p1, latents_p2, fract_mixing_parental)
+                latents_parental = interpolate_spherical(
+                    latents_p1, latents_p2, fract_mixing_parental
+                )
             list_latents_parental_mix.append(latents_parental)
 
-        idx_mixing_stop = int(round(self.num_inference_steps * self.parental_crossfeed_range))
+        idx_mixing_stop = int(
+            round(self.num_inference_steps * self.parental_crossfeed_range)
+        )
         mixing_coeffs = idx_injection * [self.parental_crossfeed_power]
         nmb_mixing = idx_mixing_stop - idx_injection
         if nmb_mixing > 0:
-            mixing_coeffs.extend(list(np.linspace(self.parental_crossfeed_power, self.parental_crossfeed_power * self.parental_crossfeed_decay, nmb_mixing)))
+            mixing_coeffs.extend(
+                list(
+                    np.linspace(
+                        self.parental_crossfeed_power,
+                        self.parental_crossfeed_power * self.parental_crossfeed_decay,
+                        nmb_mixing,
+                    )
+                )
+            )
         mixing_coeffs.extend((self.num_inference_steps - len(mixing_coeffs)) * [0])
         latents_start = list_latents_parental_mix[idx_injection - 1]
         list_latents = self.run_diffusion(
@@ -461,10 +526,13 @@ class BlendingEngine():
             latents_start=latents_start,
             idx_start=idx_injection,
             list_latents_mixing=list_latents_parental_mix,
-            mixing_coeffs=mixing_coeffs)
+            mixing_coeffs=mixing_coeffs,
+        )
         return list_latents
 
-    def get_time_based_branching(self, depth_strength, t_compute_max_allowed=None, nmb_max_branches=None):
+    def get_time_based_branching(
+        self, depth_strength, t_compute_max_allowed=None, nmb_max_branches=None
+    ):
         r"""
         Sets up the branching scheme dependent on the time that is granted for compute.
         The scheme uses an estimation derived from the first image's computation speed.
@@ -483,17 +551,23 @@ class BlendingEngine():
                 of your computer.
         """
         idx_injection_base = int(np.floor(self.num_inference_steps * depth_strength))
-        
-        steps = int(np.ceil(self.num_inference_steps/10))
-        list_idx_injection = np.arange(idx_injection_base, self.num_inference_steps, steps)
+
+        steps = int(np.ceil(self.num_inference_steps / 10))
+        list_idx_injection = np.arange(
+            idx_injection_base, self.num_inference_steps, steps
+        )
         list_nmb_stems = np.ones(len(list_idx_injection), dtype=np.int32)
         t_compute = 0
 
         if nmb_max_branches is None:
-            assert t_compute_max_allowed is not None, "Either specify t_compute_max_allowed or nmb_max_branches"
+            assert (
+                t_compute_max_allowed is not None
+            ), "Either specify t_compute_max_allowed or nmb_max_branches"
             stop_criterion = "t_compute_max_allowed"
         elif t_compute_max_allowed is None:
-            assert nmb_max_branches is not None, "Either specify t_compute_max_allowed or nmb_max_branches"
+            assert (
+                nmb_max_branches is not None
+            ), "Either specify t_compute_max_allowed or nmb_max_branches"
             stop_criterion = "nmb_max_branches"
             nmb_max_branches -= 2  # Discounting the outer frames
         else:
@@ -503,8 +577,12 @@ class BlendingEngine():
         while not stop_criterion_reached:
             list_compute_steps = self.num_inference_steps - list_idx_injection
             list_compute_steps *= list_nmb_stems
-            t_compute = np.sum(list_compute_steps) * self.dt_unet_step + self.dt_vae * np.sum(list_nmb_stems)
-            t_compute += 2 * (self.num_inference_steps * self.dt_unet_step + self.dt_vae) # outer branches
+            t_compute = np.sum(
+                list_compute_steps
+            ) * self.dt_unet_step + self.dt_vae * np.sum(list_nmb_stems)
+            t_compute += 2 * (
+                self.num_inference_steps * self.dt_unet_step + self.dt_vae
+            )  # outer branches
             increase_done = False
             for s_idx in range(len(list_nmb_stems) - 1):
                 if list_nmb_stems[s_idx + 1] / list_nmb_stems[s_idx] >= 1:
@@ -514,13 +592,21 @@ class BlendingEngine():
             if not increase_done:
                 list_nmb_stems[-1] += 1
 
-            if stop_criterion == "t_compute_max_allowed" and t_compute > t_compute_max_allowed:
+            if (
+                stop_criterion == "t_compute_max_allowed"
+                and t_compute > t_compute_max_allowed
+            ):
                 stop_criterion_reached = True
-            elif stop_criterion == "nmb_max_branches" and np.sum(list_nmb_stems) >= nmb_max_branches:
+            elif (
+                stop_criterion == "nmb_max_branches"
+                and np.sum(list_nmb_stems) >= nmb_max_branches
+            ):
                 stop_criterion_reached = True
                 if is_first_iteration:
                     # Need to undersample.
-                    list_idx_injection = np.linspace(list_idx_injection[0], list_idx_injection[-1], nmb_max_branches).astype(np.int32)
+                    list_idx_injection = np.linspace(
+                        list_idx_injection[0], list_idx_injection[-1], nmb_max_branches
+                    ).astype(np.int32)
                     list_nmb_stems = np.ones(len(list_idx_injection), dtype=np.int32)
             else:
                 is_first_iteration = False
@@ -573,20 +659,23 @@ class BlendingEngine():
                 list of the latents to be inserted
         """
         img_insert = self.dh.latent2image(list_latents[-1])
-        
+
         b_parent1, b_parent2 = self.get_closest_idx(fract_mixing)
-        left_sim = self.get_lpips_similarity(img_insert, self.tree_final_imgs[b_parent1])
-        right_sim = self.get_lpips_similarity(img_insert, self.tree_final_imgs[b_parent2])
+        left_sim = self.get_lpips_similarity(
+            img_insert, self.tree_final_imgs[b_parent1]
+        )
+        right_sim = self.get_lpips_similarity(
+            img_insert, self.tree_final_imgs[b_parent2]
+        )
         idx_insert = b_parent1 + 1
         self.tree_latents.insert(idx_insert, list_latents)
         self.tree_final_imgs.insert(idx_insert, img_insert)
         self.tree_fracts.insert(idx_insert, fract_mixing)
         self.tree_idx_injection.insert(idx_insert, idx_injection)
-        
+
         # update similarities
         self.tree_similarities[b_parent1] = left_sim
         self.tree_similarities.insert(idx_insert, right_sim)
-        
 
     def get_noise(self, seed):
         r"""
@@ -598,13 +687,14 @@ class BlendingEngine():
 
     @torch.no_grad()
     def run_diffusion(
-            self,
-            list_conditionings,
-            latents_start: torch.FloatTensor = None,
-            idx_start: int = 0,
-            list_latents_mixing=None,
-            mixing_coeffs=0.0,
-            return_image: Optional[bool] = False):
+        self,
+        list_conditionings,
+        latents_start: torch.FloatTensor = None,
+        idx_start: int = 0,
+        list_latents_mixing=None,
+        mixing_coeffs=0.0,
+        return_image: Optional[bool] = False,
+    ):
         r"""
         Wrapper function for diffusion runners.
         Depending on the mode, the correct one will be executed.
@@ -635,10 +725,8 @@ class BlendingEngine():
             idx_start=idx_start,
             list_latents_mixing=list_latents_mixing,
             mixing_coeffs=mixing_coeffs,
-            return_image=return_image)
-
-
-
+            return_image=return_image,
+        )
 
     @torch.no_grad()
     def get_mixed_conditioning(self, fract_mixing):
@@ -647,16 +735,16 @@ class BlendingEngine():
             if self.text_embedding1[i] is None:
                 mix = None
             else:
-                mix = interpolate_linear(self.text_embedding1[i], self.text_embedding2[i], fract_mixing)
+                mix = interpolate_linear(
+                    self.text_embedding1[i], self.text_embedding2[i], fract_mixing
+                )
             text_embeddings_mix.append(mix)
         list_conditionings = [text_embeddings_mix]
 
         return list_conditionings
 
     @torch.no_grad()
-    def get_text_embeddings(
-            self,
-            prompt: str):
+    def get_text_embeddings(self, prompt: str):
         r"""
         Computes the text embeddings provided a string with a prompts.
         Adapted from stable diffusion repo
@@ -677,47 +765,35 @@ class BlendingEngine():
         imgs_transition = self.tree_final_imgs
         os.makedirs(dp_img, exist_ok=True)
         for i, img in enumerate(imgs_transition):
-            img_leaf = Image.fromarray(img)
-            img_leaf.save(os.path.join(dp_img, f"lowres_img_{str(i).zfill(4)}.jpg"))
+            img.save(os.path.join(dp_img, f"lowres_img_{str(i).zfill(4)}.jpg"))
         fp_yml = os.path.join(dp_img, "lowres.yaml")
-
-    def write_movie_transition(self, fp_movie, duration_transition, fps=30):
-        r"""
-        Writes the transition movie to fp_movie, using the given duration and fps..
-        The missing frames are linearly interpolated.
-        Args:
-            fp_movie: str
-                file pointer to the final movie.
-            duration_transition: float
-                duration of the movie in seonds
-            fps: int
-                fps of the movie
-        """
-
-        # Let's get more cheap frames via linear interpolation (duration_transition*fps frames)
-        imgs_transition_ext = fill_up_frames_linear_interpolation(self.tree_final_imgs, duration_transition, fps)
-
-        # Save as MP4
-        if os.path.isfile(fp_movie):
-            os.remove(fp_movie)
-        ms = MovieSaver(fp_movie, fps=fps, shape_hw=[self.dh.height_img, self.dh.width_img])
-        for img in tqdm(imgs_transition_ext):
-            ms.write_frame(img)
-        ms.finalize()
-
 
     def get_state_dict(self):
         state_dict = {}
-        grab_vars = ['prompt1', 'prompt2', 'seed1', 'seed2', 'height', 'width',
-                     'num_inference_steps', 'depth_strength', 'guidance_scale',
-                     'guidance_scale_mid_damper', 'mid_compression_scaler', 'negative_prompt',
-                     'branch1_crossfeed_power', 'branch1_crossfeed_range', 'branch1_crossfeed_decay'
-                     'parental_crossfeed_power', 'parental_crossfeed_range', 'parental_crossfeed_decay']
+        grab_vars = [
+            "prompt1",
+            "prompt2",
+            "seed1",
+            "seed2",
+            "height",
+            "width",
+            "num_inference_steps",
+            "depth_strength",
+            "guidance_scale",
+            "guidance_scale_mid_damper",
+            "mid_compression_scaler",
+            "negative_prompt",
+            "branch1_crossfeed_power",
+            "branch1_crossfeed_range",
+            "branch1_crossfeed_decay" "parental_crossfeed_power",
+            "parental_crossfeed_range",
+            "parental_crossfeed_decay",
+        ]
         for v in grab_vars:
             if hasattr(self, v):
-                if v == 'seed1' or v == 'seed2':
+                if v == "seed1" or v == "seed2":
                     state_dict[v] = int(getattr(self, v))
-                elif v == 'guidance_scale':
+                elif v == "guidance_scale":
                     state_dict[v] = float(getattr(self, v))
 
                 else:
@@ -726,7 +802,6 @@ class BlendingEngine():
                     except Exception:
                         pass
         return state_dict
-
 
     def swap_forward(self):
         r"""
@@ -747,10 +822,10 @@ class BlendingEngine():
         Used to determine the optimal point of insertion to create smooth transitions.
         High values indicate low similarity.
         """
-        tensorA = torch.from_numpy(np.asarray(imgA)).float().cuda(self.device)
+        tensorA = torch.from_numpy(np.asarray(imgA)).float().to(self.device)
         tensorA = 2 * tensorA / 255.0 - 1
         tensorA = tensorA.permute([2, 0, 1]).unsqueeze(0)
-        tensorB = torch.from_numpy(np.asarray(imgB)).float().cuda(self.device)
+        tensorB = torch.from_numpy(np.asarray(imgB)).float().to(self.device)
         tensorB = 2 * tensorB / 255.0 - 1
         tensorB = tensorB.permute([2, 0, 1]).unsqueeze(0)
         lploss = self.lpips(tensorA, tensorB)
@@ -760,13 +835,15 @@ class BlendingEngine():
     def get_tree_similarities(self):
         similarities = []
         for i in range(len(self.tree_final_imgs) - 1):
-            similarities.append(self.get_lpips_similarity(self.tree_final_imgs[i], self.tree_final_imgs[i + 1]))
+            similarities.append(
+                self.get_lpips_similarity(
+                    self.tree_final_imgs[i], self.tree_final_imgs[i + 1]
+                )
+            )
         return similarities
 
     # Auxiliary functions
-    def get_closest_idx(
-            self,
-            fract_mixing: float):
+    def get_closest_idx(self, fract_mixing: float):
         r"""
         Helper function to retrieve the parents for any given mixing.
         Example: fract_mixing = 0.4 and self.tree_fracts = [0, 0.3, 0.6, 1.0]
@@ -788,26 +865,26 @@ class BlendingEngine():
 
         return b_parent1, b_parent2
 
-#%%
+
+# %%
 if __name__ == "__main__":
-    
+
     # %% First let us spawn a stable diffusion holder. Uncomment your version of choice.
+    from diffusers import AutoencoderTiny, DiffusionPipeline
     from diffusers_holder import DiffusersHolder
-    from diffusers import DiffusionPipeline
-    from diffusers import AutoencoderTiny
+
     # pretrained_model_name_or_path = "stabilityai/stable-diffusion-xl-base-1.0"
     pretrained_model_name_or_path = "stabilityai/sdxl-turbo"
     pipe = DiffusionPipeline.from_pretrained(pretrained_model_name_or_path)
-    
-    
+
     # pipe.to("mps")
     pipe.to("cuda")
-    
+
     # pipe.vae = AutoencoderTiny.from_pretrained('madebyollin/taesdxl', torch_device='cuda', torch_dtype=torch.float16)
     # pipe.vae = pipe.vae.cuda()
 
     dh = DiffusersHolder(pipe)
-    
+
     xxx
     # %% Next let's set up all parameters
     prompt1 = "photo of underwater landscape, fish, und the sea, incredible detail, high resolution"
@@ -829,9 +906,5 @@ if __name__ == "__main__":
     print(f"dt = {dt}")
 
     # Save movie
-    fp_movie = f'test.mp4'
+    fp_movie = f"test.mp4"
     be.write_movie_transition(fp_movie, duration_transition)
-    
-
-
-

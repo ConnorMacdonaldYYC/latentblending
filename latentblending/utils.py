@@ -14,17 +14,22 @@
 # limitations under the License.
 
 import torch
+
 torch.backends.cudnn.benchmark = False
-import numpy as np
 import warnings
-warnings.filterwarnings('ignore')
+
+import numpy as np
+
+warnings.filterwarnings("ignore")
+import datetime
 import time
 import warnings
-import datetime
 from typing import List, Union
+
 torch.set_grad_enabled(False)
-import yaml
 import PIL
+import yaml
+
 
 @torch.no_grad()
 def interpolate_spherical(p0, p1, fract_mixing: float):
@@ -45,12 +50,12 @@ def interpolate_spherical(p0, p1, fract_mixing: float):
     """
 
     if p0.dtype == torch.float16:
-        recast_to = 'fp16'
+        recast_to = "fp16"
     else:
-        recast_to = 'fp32'
+        recast_to = "fp32"
 
-    p0 = p0.double()
-    p1 = p1.double()
+    p0 = p0.float()
+    p1 = p1.float()
     norm = torch.linalg.norm(p0) * torch.linalg.norm(p1)
     epsilon = 1e-7
     dot = torch.sum(p0 * p1) / norm
@@ -63,9 +68,9 @@ def interpolate_spherical(p0, p1, fract_mixing: float):
     s1 = torch.sin(theta_t) / sin_theta_0
     interp = p0 * s0 + p1 * s1
 
-    if recast_to == 'fp16':
+    if recast_to == "fp16":
         interp = interp.half()
-    elif recast_to == 'fp32':
+    elif recast_to == "fp32":
         interp = interp.float()
 
     return interp
@@ -86,11 +91,11 @@ def interpolate_linear(p0, p1, fract_mixing):
             0.x will return a linear mix between both.
     """
     reconvert_uint8 = False
-    if type(p0) is np.ndarray and p0.dtype == 'uint8':
+    if type(p0) is np.ndarray and p0.dtype == "uint8":
         reconvert_uint8 = True
         p0 = p0.astype(np.float64)
 
-    if type(p1) is np.ndarray and p1.dtype == 'uint8':
+    if type(p1) is np.ndarray and p1.dtype == "uint8":
         reconvert_uint8 = True
         p1 = p1.astype(np.float64)
 
@@ -103,10 +108,11 @@ def interpolate_linear(p0, p1, fract_mixing):
 
 
 def add_frames_linear_interp(
-        list_imgs: List[np.ndarray],
-        fps_target: Union[float, int] = None,
-        duration_target: Union[float, int] = None,
-        nmb_frames_target: int = None):
+    list_imgs: List[np.ndarray],
+    fps_target: Union[float, int] = None,
+    duration_target: Union[float, int] = None,
+    nmb_frames_target: int = None,
+):
     r"""
     Helper function to cheaply increase the number of frames given a list of images,
     by virtue of standard linear interpolation.
@@ -129,10 +135,16 @@ def add_frames_linear_interp(
     if nmb_frames_target is not None and fps_target is not None:
         raise ValueError("You cannot specify both fps_target and nmb_frames_target")
     if fps_target is None:
-        assert nmb_frames_target is not None, "Either specify nmb_frames_target or nmb_frames_target"
+        assert (
+            nmb_frames_target is not None
+        ), "Either specify nmb_frames_target or nmb_frames_target"
     if nmb_frames_target is None:
-        assert fps_target is not None, "Either specify duration_target and fps_target OR nmb_frames_target"
-        assert duration_target is not None, "Either specify duration_target and fps_target OR nmb_frames_target"
+        assert (
+            fps_target is not None
+        ), "Either specify duration_target and fps_target OR nmb_frames_target"
+        assert (
+            duration_target is not None
+        ), "Either specify duration_target and fps_target OR nmb_frames_target"
         nmb_frames_target = fps_target * duration_target
 
     # Get number of frames that are missing
@@ -159,7 +171,9 @@ def add_frames_linear_interp(
             break
         nmb_iter += 1
         if nmb_iter > 100000:
-            print("add_frames_linear_interp: issue with inserting the right number of frames")
+            print(
+                "add_frames_linear_interp: issue with inserting the right number of frames"
+            )
             break
 
     nmb_frames_to_insert = nmb_frames_to_insert.astype(np.int32)
@@ -191,10 +205,12 @@ def get_spacing(nmb_points: int, scaling: float):
         return np.linspace(0, 1, nmb_points)
     nmb_points_per_side = nmb_points // 2 + 1
     if np.mod(nmb_points, 2) != 0:  # Uneven case
-        left_side = np.abs(np.linspace(1, 0, nmb_points_per_side)**scaling / 2 - 0.5)
+        left_side = np.abs(np.linspace(1, 0, nmb_points_per_side) ** scaling / 2 - 0.5)
         right_side = 1 - left_side[::-1][1:]
     else:
-        left_side = np.abs(np.linspace(1, 0, nmb_points_per_side)**scaling / 2 - 0.5)[0:-1]
+        left_side = np.abs(np.linspace(1, 0, nmb_points_per_side) ** scaling / 2 - 0.5)[
+            0:-1
+        ]
         right_side = 1 - left_side[::-1]
     all_fracts = np.hstack([left_side, right_side])
     return all_fracts
@@ -207,15 +223,15 @@ def get_time(resolution=None):
     if resolution is None:
         resolution = "second"
     if resolution == "day":
-        t = time.strftime('%y%m%d', time.localtime())
+        t = time.strftime("%y%m%d", time.localtime())
     elif resolution == "minute":
-        t = time.strftime('%y%m%d_%H%M', time.localtime())
+        t = time.strftime("%y%m%d_%H%M", time.localtime())
     elif resolution == "second":
-        t = time.strftime('%y%m%d_%H%M%S', time.localtime())
+        t = time.strftime("%y%m%d_%H%M%S", time.localtime())
     elif resolution == "millisecond":
-        t = time.strftime('%y%m%d_%H%M%S', time.localtime())
+        t = time.strftime("%y%m%d_%H%M%S", time.localtime())
         t += "_"
-        t += str("{:03d}".format(int(int(datetime.utcnow().strftime('%f')) / 1000)))
+        t += str("{:03d}".format(int(int(datetime.utcnow().strftime("%f")) / 1000)))
     else:
         raise ValueError("bad resolution provided: %s" % resolution)
     return t
@@ -257,6 +273,6 @@ def yml_save(fp_yml, dict_stuff):
     """
     Helper function for saving yaml files
     """
-    with open(fp_yml, 'w') as f:
+    with open(fp_yml, "w") as f:
         yaml.dump(dict_stuff, f, sort_keys=False, default_flow_style=False)
     print("yml_save: saved {}".format(fp_yml))
